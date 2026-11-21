@@ -1,0 +1,150 @@
+diff --git a/vllm/models/inkling2/nvidia/ops/moe.py b/vllm/models/inkling2/nvidia/ops/moe.py
+index f4c0f540a..a0d9c52ee 100644
+--- a/vllm/models/inkling2/nvidia/ops/moe.py
++++ b/vllm/models/inkling2/nvidia/ops/moe.py
+@@ -181,7 +181,8 @@ def _place_experts(
+     NUM_LOCAL: tl.constexpr,
+     LOCAL_POW2: tl.constexpr,
+     TILE: tl.constexpr,
+-    MAX_CTAS: tl.constexpr,
++    MAX_CTAS,
++    CTAS_POW2: tl.constexpr,  # next_power_of_2(MAX_CTAS)
+ ):
+     """Lays out the experts' rows (`Counts`, then reset) in `TILE`-row
+     tiles: stores each expert's first layout row, first routed row and end
+@@ -202,7 +203,7 @@ def _place_experts(
+     tl.store(Tiles + 2 * MAX_CTAS + 2, tl.sum(counts, 0))
+     # The expert of each tile: mark each expert's first tile, then take the
+     # running maximum. Tiles past the last are left as they are.
+-    ctas = tl.arange(0, triton.next_power_of_2(MAX_CTAS))
++    ctas = tl.arange(0, CTAS_POW2)
+     tl.store(Tiles + ctas, 0, ctas < num_tiles)
+     tl.debug_barrier()
+     tl.store(Tiles + tile_ends - tiles, experts, tiles > 0)
+@@ -257,7 +258,7 @@ def _place_token(
+     token,
+     TOPK: tl.constexpr,
+     TILE: tl.constexpr,
+-    MAX_CTAS: tl.constexpr,
++    MAX_CTAS,
+ ):
+     """Places the local rows of token `token` (`_place_rows`) for batches
+     of at most `TILE` tokens, whose experts take one tile each, from the
+@@ -572,7 +573,7 @@ NVFP4_SCATTER_MIN_TOKENS = 2048
+ LAUNCH_DEPENDENTS_MAX_TOKENS = 256
+ 
+ 
+-@triton.jit
++@triton.jit(do_not_specialize=["MAX_CTAS"])
+ def _fused_route_kernel(
+     X,
+     GateWeight,
+@@ -601,7 +602,7 @@ def _fused_route_kernel(
+     NUM_LOCAL: tl.constexpr,
+     LOCAL_POW2: tl.constexpr,
+     TILE: tl.constexpr,
+-    MAX_CTAS: tl.constexpr,
++    MAX_CTAS,  # runtime: a constexpr recompiles for every batch size
+     NVFP4: tl.constexpr,
+     HEAD: tl.constexpr,
+     TAIL: tl.constexpr,
+@@ -714,7 +715,7 @@ def _fused_route_kernel(
+             tl.store(Counters + _TOKENS_DONE, 0)
+ 
+ 
+-@triton.jit
++@triton.jit(do_not_specialize=["MAX_CTAS"])
+ def _route_tokens_kernel(
+     Partials,
+     Bias,
+@@ -737,7 +738,8 @@ def _route_tokens_kernel(
+     NUM_LOCAL: tl.constexpr,
+     LOCAL_POW2: tl.constexpr,
+     TILE: tl.constexpr,
+-    MAX_CTAS: tl.constexpr,
++    MAX_CTAS,  # runtime: a constexpr recompiles for every prefill size
++    CTAS_POW2: tl.constexpr,
+ ):
+     # Selects a token's experts (stores their local index, -1: not local or
+     # padding) and ranks its local rows within their experts (in ``Counts``,
+@@ -764,7 +766,9 @@ def _route_tokens_kernel(
+     tl.store(Weights + slots, weights)
+     tl.debug_barrier()
+     if tl.atomic_add(Counters + _TOKENS_DONE, 1, sem="acq_rel") == T - 1:
+-        _place_experts(Counts, Starts, Tiles, NUM_LOCAL, LOCAL_POW2, TILE, MAX_CTAS)
++        _place_experts(
++            Counts, Starts, Tiles, NUM_LOCAL, LOCAL_POW2, TILE, MAX_CTAS, CTAS_POW2
++        )
+         tl.store(Counters + _TOKENS_DONE, 0)
+ 
+ 
+@@ -1001,6 +1005,7 @@ def route(
+         LOCAL_POW2=local_pow2,
+         TILE=plan.tile,
+         MAX_CTAS=plan.max_ctas,
++        CTAS_POW2=triton.next_power_of_2(plan.max_ctas),
+         num_warps=4 if tokens <= 128 else 1,
+         launch_pdl=True,
+     )
+diff --git a/vllm/models/inkling2/nvidia/ops/moe_humming.py b/vllm/models/inkling2/nvidia/ops/moe_humming.py
+index a706d02f8..e96c6ac57 100644
+--- a/vllm/models/inkling2/nvidia/ops/moe_humming.py
++++ b/vllm/models/inkling2/nvidia/ops/moe_humming.py
+@@ -14,7 +14,7 @@ from .moe_sm90 import HummingExperts
+ from .trtllm_bmm import ExpertPlan
+ 
+ 
+-@triton.jit
++@triton.jit(do_not_specialize=["MAX_CTAS"])
+ def _prepare_rows(
+     Scales,
+     Tiles,
+@@ -22,7 +22,7 @@ def _prepare_rows(
+     Ids,
+     GROUPS: tl.constexpr,
+     TILE: tl.constexpr,
+-    MAX_CTAS: tl.constexpr,
++    MAX_CTAS,  # runtime: a constexpr recompiles for every prefill size
+     BLOCK: tl.constexpr,
+ ):
+     row = tl.program_id(0)
+diff --git a/vllm/models/inkling2/nvidia/ops/moe_sm120.py b/vllm/models/inkling2/nvidia/ops/moe_sm120.py
+index 8a438dd37..b47087ae6 100644
+--- a/vllm/models/inkling2/nvidia/ops/moe_sm120.py
++++ b/vllm/models/inkling2/nvidia/ops/moe_sm120.py
+@@ -14,7 +14,7 @@ from .block_scales import _scale_offsets
+ from .trtllm_bmm import ExpertPlan
+ 
+ 
+-@triton.jit
++@triton.jit(do_not_specialize=["MAX_CTAS"])
+ def _expert_gemm(
+     Act,
+     ActScale,
+@@ -24,7 +24,7 @@ def _expert_gemm(
+     ExpertScale,
+     Out,
+     Tiles,
+-    MAX_CTAS: tl.constexpr,
++    MAX_CTAS,  # runtime: a constexpr recompiles for every prefill size
+     N: tl.constexpr,
+     K: tl.constexpr,
+     TILE: tl.constexpr,
+@@ -90,7 +90,7 @@ def _expand_scales(scales):
+     return tl.reshape(scales, (rows, groups * 32))
+ 
+ 
+-@triton.jit
++@triton.jit(do_not_specialize=["MAX_CTAS"])
+ def _mxfp8_gemm(
+     Act,
+     ActScale,
+@@ -99,7 +99,7 @@ def _mxfp8_gemm(
+     ExpertScale,
+     Out,
+     Tiles,
+-    MAX_CTAS: tl.constexpr,
++    MAX_CTAS,  # runtime: a constexpr recompiles for every prefill size
+     N: tl.constexpr,
+     K: tl.constexpr,
+     TILE: tl.constexpr,

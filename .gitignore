@@ -1,0 +1,4 @@
+# vLLM source checkout (build.sh), model weights, local settings
+/vllm/
+/models/
+.env

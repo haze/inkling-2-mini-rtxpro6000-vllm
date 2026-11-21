@@ -1,0 +1,86 @@
+# Inkling 2 Mini on one NVIDIA RTX PRO 6000 Blackwell (96 GB), serving vLLM's
+# OpenAI-compatible API. Build the image with ./build.sh first; see README.md.
+#
+#   docker compose up --wait  # start; returns once the server is healthy
+#   docker compose logs -f    # follow the logs
+#   docker compose down       # stop and free the GPU
+#
+# The ${INKLING_*} settings can be overridden in a .env file next to this one.
+name: inkling2-mini
+services:
+  inkling:
+    image: vllm-inkling2-mini:sm120
+    # Built locally by ./build.sh, never pulled from a registry.
+    pull_policy: never
+    container_name: inkling2-mini
+    # Restart after a crash, but don't start at boot. Use "unless-stopped" for
+    # an always-on service.
+    restart: on-failure:3
+    ipc: host
+    ports:
+      - "${INKLING_BIND:-0.0.0.0}:${INKLING_PORT:-8000}:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${INKLING_GPU:-0}"]
+              capabilities: [gpu]
+    volumes:
+      - type: bind
+        source: ${INKLING_MODEL_DIR:-./models/Inkling-2-Mini}
+        target: /models/Inkling-2-Mini
+        read_only: true
+        bind:
+          create_host_path: false
+      # Compiled-kernel caches (vLLM, Triton, FlashInfer, CUDA JIT), kept so
+      # restarts don't recompile. `docker compose down -v` deletes them.
+      - cache:/root/.cache
+      - triton-cache:/root/.triton
+      - cuda-cache:/root/.nv
+    environment:
+      - HF_HUB_OFFLINE=1
+      - VLLM_NO_USAGE_STATS=1
+      # Room for the CUDA JIT cache (some vision-encoder kernels ship as PTX).
+      - CUDA_CACHE_MAXSIZE=4294967296
+      # Rust frontend for HTTP, chat templating and image preprocessing; much
+      # faster with many or large images. Set to 0 for the Python frontend.
+      - VLLM_USE_RUST_FRONTEND=1
+    command:
+      - /models/Inkling-2-Mini
+      - --served-model-name=thinkingmachines/Inkling-2-Mini
+      - --host=0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=1
+      # The model's full 1M-token context. Needs the FP8 KV cache below.
+      - --max-model-len=1048576
+      # Checkpoint the sliding-window/conv-state cache every 16K tokens, so a
+      # new question about a long prompt that was already sent reuses the prefix
+      # cache instead of re-reading the whole prompt.
+      - --prefix-cache-retention-interval=16384
+      - --limit-mm-per-prompt={"image":999}
+      # Must cover the largest single image (4096x4096 is ~10.6K tokens).
+      - --max-num-batched-tokens=16384
+      # Larger values make DSpark's sampler buffers run out of memory at startup.
+      - --max-num-seqs=64
+      - --gpu-memory-utilization=0.92
+      # Humming NVFP4 MoE kernels for SM120.
+      - --moe-backend=humming
+      # FP8 KV cache: in BF16, a 1M-token request doesn't fit in GPU memory.
+      - --kv-cache-dtype=fp8_e4m3
+      - --reasoning-parser=inkling
+      - --enable-auto-tool-choice
+      - --tool-call-parser=inkling
+      # DSpark speculative decoding. The checkpoint requires exactly 7 draft tokens.
+      - --speculative-config={"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 1800s
+
+volumes:
+  cache:
+  triton-cache:
+  cuda-cache:
