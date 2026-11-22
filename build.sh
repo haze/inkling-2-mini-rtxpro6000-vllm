@@ -2,13 +2,14 @@
 # Builds the image used by compose.yaml: vLLM's OpenAI-compatible server with
 # Inkling 2 Mini support, compiled for SM120 (RTX PRO 6000 Blackwell).
 #
-# Inkling 2 Mini support is in vllm-project/vllm#69028, which is not in a vLLM
+# Inkling 2 Mini support (vllm-project/vllm#69028) is in vLLM main but not in a
 # release yet, and no published x86_64 vLLM image has both that support and
-# SM120 kernels. This builds the PR from source at a tested commit, with the
+# SM120 kernels. This builds vLLM main from source at a pinned commit, with the
 # fixes in patches/ applied.
 #
 # Optional environment variables:
-#   VLLM_REF      vLLM commit (full SHA) or ref to build; default: tested PR commit
+#   VLLM_REF      vLLM commit (full SHA) or ref to build, e.g. main for the
+#                 newest commit; default: the pinned main commit
 #   MAX_JOBS      parallel compile jobs; default: one per CPU core, but no more
 #                 than one per 8 GB of RAM
 #   NVCC_THREADS  threads per CUDA compile job; default: 2
@@ -16,7 +17,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${HERE}/vllm"
-VLLM_REF="${VLLM_REF:-b426b46e63408c41b0aec069fdaf24dd640abe58}"
+VLLM_REF="${VLLM_REF:-8c17e4692a7cf393e3d1dacf6404fa4d48d993a1}"
 IMAGE=vllm-inkling2-mini:sm120  # the tag compose.yaml runs
 ARCHS="12.0"                    # SM120
 
@@ -35,7 +36,7 @@ if [[ ! -d "${SRC}/.git" ]]; then
   git clone --filter=blob:none --no-checkout \
     https://github.com/vllm-project/vllm.git "${SRC}"
 fi
-# Fetch the exact commit, so the build keeps working after the PR branch moves.
+# Fetch the exact commit, so the build doesn't change when main moves.
 git -C "${SRC}" fetch -q origin "${VLLM_REF}"
 git -C "${SRC}" checkout -q -f FETCH_HEAD
 for p in "${HERE}"/patches/*.patch; do

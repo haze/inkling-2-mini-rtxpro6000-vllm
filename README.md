@@ -5,12 +5,15 @@ through vLLM's OpenAI-compatible API on one NVIDIA RTX PRO 6000 Blackwell, with
 the model's full 1M-token context, up to 999 images per prompt and DSpark
 speculative decoding.
 
-Inkling 2 Mini support is in an unmerged vLLM pull request
-([#69028](https://github.com/vllm-project/vllm/pull/69028)), and no published
-x86_64 vLLM image has both that support and kernels for this GPU (SM120). `build.sh`
-builds the PR from source at a tested commit for SM120, with one fix from
-`patches/` (it stops the MoE kernels from recompiling for every new prompt
-length). `compose.yaml` runs the server.
+Inkling 2 Mini support
+([#69028](https://github.com/vllm-project/vllm/pull/69028)) is in vLLM main but
+not in a release yet, and no published x86_64 vLLM image has both that support
+and kernels for this GPU (SM120). `build.sh` builds vLLM main from source at a
+pinned commit for SM120, with one fix from `patches/` (it stops the MoE kernels
+from recompiling for every new prompt length). The pinned commit includes the
+SM120 speedups from [#69021](https://github.com/vllm-project/vllm/pull/69021)
+and [#69168](https://github.com/vllm-project/vllm/pull/69168). `compose.yaml`
+runs the server.
 
 ## Prerequisites
 
@@ -47,9 +50,9 @@ and NVIDIA Container Toolkit 1.20.
 In a clone of this repo:
 
 ```bash
-# 1. Download the model (~20 GB) at the tested revision.
+# 1. Download the model (~20 GB) at the pinned revision.
 hf download thinkingmachines/Inkling-2-Mini \
-    --revision 1fb4134b9a74f9681054f4ef82e4bf1f458a2337 \
+    --revision b85c3cfa615fc413cc9af3379f491b963f3b586a \
     --local-dir models/Inkling-2-Mini
 
 # 2. Build the image, vllm-inkling2-mini:sm120 (~45 minutes).
@@ -59,6 +62,10 @@ hf download thinkingmachines/Inkling-2-Mini \
 A successful build ends with `Built vllm-inkling2-mini:sm120`. If it fails with
 `Killed` or `signal 9`, the machine ran out of memory: use fewer compile jobs,
 e.g. `MAX_JOBS=4 ./build.sh`.
+
+To build the newest vLLM main instead of the pinned commit, run
+`VLLM_REF=main ./build.sh`. If the patch in `patches/` no longer applies, the
+build stops before compiling.
 
 ## Run
 
